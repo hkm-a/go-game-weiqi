@@ -20,12 +20,17 @@ class GameState:
         self.moves_since_last_capture = 0
         self.moves_since_last_big_move = 0
         self.last_board_hash = None
+        self.ko_history = []
     
     def get_board_hash(self):
         return self.board.get_state_hash()
     
     def make_move(self, x, y):
         if self.game_status != 'playing':
+            return False
+        
+        # 超级劫检测：检查局面是否出现过
+        if self._is_superko(x, y):
             return False
         
         if not self.rules.is_valid_move(self.board, x, y, self.current_player, self.ko_point):
@@ -53,10 +58,29 @@ class GameState:
             self.current_player = 'W' if self.current_player == 'B' else 'B'
             self.consecutive_passes = 0
             
+            # 记录当前棋盘哈希
+            self.ko_history.append(self.get_board_hash())
+            
             if self._should_auto_end():
                 self.end_game()
         
         return success
+    
+    def _is_superko(self, x, y):
+        """
+        检测是否是超级劫（局面重复）
+        """
+        if len(self.ko_history) < 2:
+            return False
+        
+        test_board = self.board.copy()
+        if self.rules.is_valid_move(test_board, x, y, self.current_player, self.ko_point):
+            self.rules.place_stone(test_board, x, y, self.current_player, self.ko_point)
+            test_hash = test_board.get_state_hash()
+            if test_hash in self.ko_history:
+                return True
+        
+        return False
     
     def _is_big_move(self, x, y):
         for dx in [-2, -1, 0, 1, 2]:
@@ -263,7 +287,8 @@ class GameState:
             'game_status': self.game_status,
             'consecutive_passes': self.consecutive_passes,
             'winner': self.winner,
-            'final_score': self.final_score
+            'final_score': self.final_score,
+            'ko_history': self.ko_history.copy()
         }
     
     def load_state(self, snapshot):
@@ -276,6 +301,7 @@ class GameState:
         self.consecutive_passes = snapshot.get('consecutive_passes', 0)
         self.winner = snapshot.get('winner', None)
         self.final_score = snapshot.get('final_score', None)
+        self.ko_history = snapshot.get('ko_history', [])
     
     def save_game(self, filename='data/saves/savegame.pkl'):
         os.makedirs(os.path.dirname(filename), exist_ok=True)
