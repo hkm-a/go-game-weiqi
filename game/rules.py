@@ -36,8 +36,9 @@ class Rules:
         test_board.set_stone(x, y, color)
         
         captures = self.check_captures(test_board, x, y, color)
-        if captures:
-            return False
+        for group in captures:
+            for pos in group:
+                test_board.set_stone(pos[0], pos[1], None)
         
         group = test_board.get_group(x, y)
         return test_board.get_liberties(group) == 0
@@ -52,10 +53,10 @@ class Rules:
         
         if len(captures) == 1 and len(captures[0]) == 1:
             captured = captures[0][0]
-            test_board_after = test_board.copy()
-            self.remove_group(test_board_after, captures[0])
+            temp_board = test_board.copy()
+            self.remove_group(temp_board, captures[0])
             
-            if test_board_after.get_state_hash() == previous_board.get_state_hash():
+            if temp_board.get_state_hash() == previous_board.get_state_hash():
                 return captured
         
         return None

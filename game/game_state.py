@@ -146,6 +146,7 @@ class GameState:
         stack = [(start_x, start_y)]
         territory = set()
         border_colors = set()
+        all_adjacent_points = []
         
         while stack:
             x, y = stack.pop()
@@ -157,6 +158,7 @@ class GameState:
             stone = self.board.get_stone(x, y)
             if stone is not None:
                 border_colors.add(stone)
+                all_adjacent_points.append((x, y))
                 continue
             
             territory.add((x, y))
