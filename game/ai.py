@@ -10,6 +10,30 @@ class AI:
     
     def evaluate_position(self, board, color):
         raise NotImplementedError()
+    
+    def find_ko_threats(self, board, color, ko_point, rules):
+        """
+        寻找劫材
+        
+        Args:
+            board: 当前棋盘
+            color: AI颜色
+            ko_point: 劫点位置
+            rules: 规则对象
+        
+        Returns:
+            劫材位置列表，按威胁程度排序
+        """
+        from game.ko_utils import KoUtils
+        
+        if ko_point is None:
+            return []
+        
+        threats = KoUtils.find_ko_threats(board, color)
+        
+        threats = [pos for pos in threats if pos != ko_point]
+        
+        return threats
 
 
 class EasyAI(AI):
@@ -97,6 +121,11 @@ class EasyAI(AI):
         
         if not valid_moves:
             return None
+        
+        if ko_point is not None:
+            ko_threats = self.find_ko_threats(board, color, ko_point, rules)
+            if ko_threats:
+                return random.choice(ko_threats)
         
         capturing_moves = self.find_capturing_moves(board, color, rules, ko_point)
         if capturing_moves:
@@ -330,6 +359,23 @@ class MediumAI(AI):
     def get_move(self, board, color, rules, ko_point=None) -> Optional[Tuple[int, int]]:
         self.start_time = time.time()
         
+        if ko_point is not None:
+            ko_threats = self.find_ko_threats(board, color, ko_point, rules)
+            if ko_threats:
+                best_threat = None
+                best_score = -float('inf')
+                
+                for threat in ko_threats:
+                    test_board = board.copy()
+                    test_board.set_stone(threat[0], threat[1], color)
+                    score = self.evaluate_position(test_board, color)
+                    if score > best_score:
+                        best_score = score
+                        best_threat = threat
+                
+                if best_threat:
+                    return best_threat
+        
         all_valid = []
         for y in range(board.size):
             for x in range(board.size):
@@ -397,103 +443,69 @@ class MCTSNode:
         self.children = []
         self.wins = 0
         self.visits = 0
-        self.untried_moves = self._get_valid_moves()
+        self.untried_moves = None
     
-    def _get_valid_moves(self):
-        moves = []
+    def get_untried_moves(self):
+        if self.untried_moves is None:
+            self.untried_moves = []
+            for y in range(self.board.size):
+                for x in range(self.board.size):
+                    if self.rules.is_valid_move(self.board, x, y, self.color, self.ko_point):
+                        self.untried_moves.append((x, y))
+        return self.untried_moves
+    
+    def is_fully_expanded(self):
+        return len(self.get_untried_moves()) == 0
+    
+    def is_terminal(self):
+        if not self.get_untried_moves() and not self.children:
+            return True
+        
         for y in range(self.board.size):
             for x in range(self.board.size):
                 if self.rules.is_valid_move(self.board, x, y, self.color, self.ko_point):
-                    moves.append((x, y))
-        return moves
-    
-    def is_fully_expanded(self):
-        return len(self.untried_moves) == 0
-    
-    def is_terminal(self):
-        return len(self.untried_moves) == 0
-    
-    def select_child(self, c_param=1.4):
-        choices_weights = [
-            (child.wins / child.visits) + c_param * math.sqrt((2 * math.log(self.visits) / child.visits))
-            for child in self.children
-        ]
-        return self.children[choices_weights.index(max(choices_weights))]
-    
-    def expand(self):
-        move = self.untried_moves.pop(random.randint(0, len(self.untried_moves) - 1))
-        new_board = self.board.copy()
-        new_ko_point = self.rules.place_stone(new_board, move[0], move[1], self.color, self.ko_point)[2]
-        next_color = 'W' if self.color == 'B' else 'B'
-        child_node = MCTSNode(new_board, next_color, self.rules, new_ko_point, self, move)
-        self.children.append(child_node)
-        return child_node
-    
-    def simulate(self, original_color, max_steps=50):
-        board_copy = self.board.copy()
-        current_color = self.color
-        current_ko = self.ko_point
-        steps = 0
+                    return False
         
-        while steps < max_steps:
+        return True
+    
+    def simulate(self):
+        sim_board = self.board.copy()
+        sim_color = self.color
+        
+        for _ in range(50):
             valid_moves = []
-            for y in range(board_copy.size):
-                for x in range(board_copy.size):
-                    if self.rules.is_valid_move(board_copy, x, y, current_color, current_ko):
+            for y in range(sim_board.size):
+                for x in range(sim_board.size):
+                    if self.rules.is_valid_move(sim_board, x, y, sim_color, self.ko_point):
                         valid_moves.append((x, y))
             
             if not valid_moves:
                 break
             
             move = random.choice(valid_moves)
-            current_ko = self.rules.place_stone(board_copy, move[0], move[1], current_color, current_ko)[2]
-            current_color = 'W' if current_color == 'B' else 'B'
-            steps += 1
+            sim_board.set_stone(move[0], move[1], sim_color)
+            sim_color = 'W' if sim_color == 'B' else 'B'
         
-        score = self._evaluate_simulation(board_copy, original_color)
-        return score
+        return self.evaluate(sim_board, self.color)
     
-    def _evaluate_simulation(self, board, original_color):
-        opponent = 'W' if original_color == 'B' else 'B'
-        score = 0
-        
-        all_groups = board.get_all_groups()
-        
-        for group in all_groups:
-            group_color = board.get_stone(group[0][0], group[0][1])
-            group_size = len(group)
-            liberties = board.get_liberties(group)
-            
-            if group_color == original_color:
-                score += group_size * 2
-                if liberties >= 3:
-                    score += 5
-                elif liberties == 1:
-                    score -= 10
-            else:
-                score -= group_size * 2
-                if liberties >= 3:
-                    score -= 5
-                elif liberties == 1:
-                    score += 10
-        
-        return 1 if score > 0 else 0 if score < 0 else 0.5
+    def evaluate(self, board, color):
+        opponent = 'W' if color == 'B' else 'B'
+        return self._count_stones(board, color) - self._count_stones(board, opponent)
     
-    def backpropagate(self, result):
-        self.visits += 1
-        self.wins += result
-        if self.parent:
-            self.parent.backpropagate(1 - result)
+    def _count_stones(self, board, color):
+        count = 0
+        for y in range(board.size):
+            for x in range(board.size):
+                if board.get_stone(x, y) == color:
+                    count += 1
+        return count
 
 
 class HardAI(AI):
     def __init__(self):
-        self.time_limit = 8.0
-        self.opening_points = [
-            (3, 3), (3, 9), (3, 15),
-            (9, 3), (9, 9), (9, 15),
-            (15, 3), (15, 9), (15, 15)
-        ]
+        self.mcts_iterations = 500
+        self.mcts_time_limit = 4.0
+        self.start_time = 0
     
     def evaluate_position(self, board, color):
         opponent = 'W' if color == 'B' else 'B'
@@ -508,146 +520,129 @@ class HardAI(AI):
             
             if group_color == color:
                 score += group_size * 3
-                if liberties >= 3:
+                
+                if liberties >= 4:
                     score += 15
+                elif liberties == 3:
+                    score += 10
                 elif liberties == 2:
-                    score += 8
+                    score += 5
                 elif liberties == 1:
                     score -= 30
             else:
                 score -= group_size * 3
-                if liberties >= 3:
+                
+                if liberties >= 4:
                     score -= 15
+                elif liberties == 3:
+                    score -= 10
                 elif liberties == 2:
-                    score -= 8
+                    score -= 5
                 elif liberties == 1:
                     score += 30
         
-        for y in range(board.size):
-            for x in range(board.size):
-                if board.is_empty(x, y):
-                    continue
-                stone_color = board.get_stone(x, y)
-                neighbors = 0
-                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    nx, ny = x + dx, y + dy
-                    if board.is_valid_position(nx, ny) and board.get_stone(nx, ny) == stone_color:
-                        neighbors += 1
-                if stone_color == color:
-                    score += neighbors * 0.8
-                else:
-                    score -= neighbors * 0.8
-        
         return score
     
-    def get_candidate_moves(self, board, color, rules, ko_point=None):
-        candidates = []
-        interesting_positions = set()
+    def mcts(self, board, color, rules, ko_point):
+        root = MCTSNode(board, color, rules, ko_point)
         
-        all_groups = board.get_all_groups()
-        for group in all_groups:
-            liberties = board.get_liberties(group)
-            if liberties <= 3:
-                for (x, y) in group:
-                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                        nx, ny = x + dx, y + dy
-                        if board.is_valid_position(nx, ny) and board.is_empty(nx, ny):
-                            interesting_positions.add((nx, ny))
+        end_time = time.time() + self.mcts_time_limit
         
-        for y in range(board.size):
-            for x in range(board.size):
-                if board.is_empty(x, y):
-                    has_neighbor = False
-                    for dx in [-2, -1, 0, 1, 2]:
-                        for dy in [-2, -1, 0, 1, 2]:
-                            if dx == 0 and dy == 0:
-                                continue
-                            nx, ny = x + dx, y + dy
-                            if board.is_valid_position(nx, ny) and not board.is_empty(nx, ny):
-                                has_neighbor = True
-                                break
-                        if has_neighbor:
-                            break
-                    if has_neighbor:
-                        interesting_positions.add((x, y))
+        for _ in range(self.mcts_iterations):
+            if time.time() > end_time:
+                break
+            
+            node = root
+            sim_board = board.copy()
+            sim_color = color
+            sim_ko_point = ko_point
+            
+            while node.children:
+                node = max(node.children, key=lambda n: n.wins / n.visits if n.visits > 0 else 0)
+                sim_board.set_stone(node.move[0], node.move[1], sim_color)
+                sim_color = 'W' if sim_color == 'B' else 'B'
+            
+            if node.get_untried_moves():
+                move = random.choice(node.get_untried_moves())
+                new_node = MCTSNode(sim_board, sim_color, rules, sim_ko_point, parent=node, move=move)
+                node.children.append(new_node)
+                node = new_node
+                sim_board.set_stone(move[0], move[1], sim_color)
+                sim_color = 'W' if sim_color == 'B' else 'B'
+            
+            result = node.simulate()
+            node.wins += result
+            node.visits += 1
+            
+            while node.parent:
+                node = node.parent
+                node.visits += 1
         
-        for x, y in self.opening_points:
-            if board.is_empty(x, y):
-                interesting_positions.add((x, y))
+        if not root.children:
+            return None
         
-        for x, y in interesting_positions:
-            if rules.is_valid_move(board, x, y, color, ko_point):
-                candidates.append((x, y))
-        
-        if not candidates:
-            for y in range(board.size):
-                for x in range(board.size):
-                    if rules.is_valid_move(board, x, y, color, ko_point):
-                        candidates.append((x, y))
-        
-        return candidates[:20]
-    
-    def get_best_moves_with_scores(self, board, color, rules, ko_point=None):
-        all_valid = self.get_candidate_moves(board, color, rules, ko_point)
-        if not all_valid:
-            return []
-        
-        move_scores = []
-        for move in all_valid:
-            test_board = board.copy()
-            test_ko = rules.place_stone(test_board, move[0], move[1], color, ko_point)[2]
-            score = self.evaluate_position(test_board, color)
-            move_scores.append((move, score))
-        
-        move_scores.sort(key=lambda x: x[1], reverse=True)
-        return move_scores
+        best_child = max(root.children, key=lambda n: n.visits)
+        return best_child.move
     
     def get_move(self, board, color, rules, ko_point=None) -> Optional[Tuple[int, int]]:
-        start_time = time.time()
+        if ko_point is not None:
+            ko_threats = self.find_ko_threats(board, color, ko_point, rules)
+            if ko_threats:
+                best_threat = None
+                best_score = -float('inf')
+                
+                for threat in ko_threats:
+                    test_board = board.copy()
+                    test_board.set_stone(threat[0], threat[1], color)
+                    score = self.evaluate_position(test_board, color)
+                    if score > best_score:
+                        best_score = score
+                        best_threat = threat
+                
+                if best_threat:
+                    return best_threat
         
-        all_valid = self.get_candidate_moves(board, color, rules, ko_point)
+        all_valid = []
+        for y in range(board.size):
+            for x in range(board.size):
+                if rules.is_valid_move(board, x, y, color, ko_point):
+                    all_valid.append((x, y))
+        
         if not all_valid:
             return None
         
+        opponent = 'W' if color == 'B' else 'B'
         for x, y in all_valid:
             test_board = board.copy()
             test_board.set_stone(x, y, color)
             captures = rules.check_captures(test_board, x, y, color)
             if captures:
                 total_captured = sum(len(g) for g in captures)
-                if total_captured >= 3:
+                if total_captured >= 2:
                     return (x, y)
         
-        all_groups = board.get_all_groups()
-        for group in all_groups:
-            if board.get_stone(group[0][0], group[0][1]) == color:
-                liberties = board.get_liberties(group)
-                if liberties == 1:
-                    for x, y in all_valid:
-                        test_board = board.copy()
-                        test_board.set_stone(x, y, color)
-                        new_group = test_board.get_group(x, y)
-                        if new_group:
-                            new_liberties = test_board.get_liberties(new_group)
-                            if new_liberties > 1:
-                                return (x, y)
-        
-        root = MCTSNode(board.copy(), color, rules, ko_point)
-        
-        while time.time() - start_time < self.time_limit:
-            node = root
-            
-            while node.is_fully_expanded() and not node.is_terminal():
-                node = node.select_child()
-            
-            if not node.is_fully_expanded():
-                node = node.expand()
-            
-            result = node.simulate(color)
-            node.backpropagate(result)
-        
-        if root.children:
-            best_child = max(root.children, key=lambda c: c.visits)
-            return best_child.move
+        move = self.mcts(board, color, rules, ko_point)
+        if move:
+            return move
         
         return random.choice(all_valid)
+    
+    def get_best_moves_with_scores(self, board, color, rules, ko_point=None):
+        valid_moves = []
+        for y in range(board.size):
+            for x in range(board.size):
+                if rules.is_valid_move(board, x, y, color, ko_point):
+                    valid_moves.append((x, y))
+        
+        if not valid_moves:
+            return []
+        
+        move_scores = []
+        for move in valid_moves:
+            test_board = board.copy()
+            rules.place_stone(test_board, move[0], move[1], color, ko_point)
+            score = self.evaluate_position(test_board, color)
+            move_scores.append((move, score))
+        
+        move_scores.sort(key=lambda x: x[1], reverse=True)
+        return move_scores[:10]
