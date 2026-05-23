@@ -167,13 +167,16 @@ class GameState:
         return black_territory, white_territory
     
     def _flood_fill_territory(self, start_x, start_y, visited):
-        stack = [(start_x, start_y)]
+        from collections import deque
+        queue = deque()
+        queue.append((start_x, start_y))
+        
         territory = set()
         border_colors = set()
         all_adjacent_points = []
         
-        while stack:
-            x, y = stack.pop()
+        while queue:
+            x, y = queue.popleft()
             if (x, y) in territory:
                 continue
             if not self.board.is_valid_position(x, y):
@@ -189,7 +192,7 @@ class GameState:
             visited.add((x, y))
             
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                stack.append((x + dx, y + dy))
+                queue.append((x + dx, y + dy))
         
         owner = None
         if len(border_colors) == 1:
