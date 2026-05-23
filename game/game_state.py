@@ -1,12 +1,14 @@
 from game.board import Board
 from game.rules import Rules
+import math
 import pickle
 import os
 
 
 class GameState:
-    def __init__(self):
-        self.board = Board()
+    def __init__(self, board_size=19):
+        self.board_size = board_size
+        self.board = Board(board_size)
         self.current_player = 'B'
         self.move_count = 0
         self.captures = {'B': 0, 'W': 0}
@@ -21,6 +23,11 @@ class GameState:
         self.moves_since_last_big_move = 0
         self.last_board_hash = None
         self.ko_history = []
+        self.last_move = None
+        self.move_history = []       # [(x, y, color), ...] — 走法序列
+        self.redo_history = []       # 回顾模式前进用的快照
+        self.review_index = -1       # 回顾模式当前步数索引，-1 表示不在回顾模式
+        self.dead_stones = set()     # 被标记为死子的位置 {(x, y), ...}
     
     def get_board_hash(self):
         return self.board.get_state_hash()
@@ -55,9 +62,15 @@ class GameState:
             else:
                 self.moves_since_last_big_move += 1
             
+            moving_player = self.current_player
             self.current_player = 'W' if self.current_player == 'B' else 'B'
             self.consecutive_passes = 0
-            
+
+            # 记录最后落子位置和走法历史
+            self.last_move = (x, y)
+            self.move_history.append((x, y, moving_player))
+            self.redo_history.clear()
+
             # 记录当前棋盘哈希
             self.ko_history.append(self.get_board_hash())
             
@@ -106,23 +119,62 @@ class GameState:
         if self.game_status != 'playing':
             return False
         
+        passing_player = self.current_player
         self.save_state()
         self.consecutive_passes += 1
         self.move_count += 1
         self.current_player = 'W' if self.current_player == 'B' else 'B'
+        self.last_move = None  # PASS 清除最后落子
+        self.move_history.append((None, None, passing_player))
+        self.redo_history.clear()
         
         if self.consecutive_passes >= 2:
-            self.end_game()
+            self.begin_dead_marking()
         
         return True
     
     def end_game(self):
         self.game_status = 'ended'
         self.calculate_final_score()
+
+    def begin_dead_marking(self):
+        """进入死子标记模式（终局结算前）"""
+        self.game_status = 'end_marking'
+        self.dead_stones.clear()
     
+    def mark_dead_stone(self, x, y):
+        """标记/取消标记死子"""
+        pos = (x, y)
+        if pos in self.dead_stones:
+            self.dead_stones.discard(pos)
+        else:
+            self.dead_stones.add(pos)
+
+    def clear_dead_stones(self):
+        """清除所有死子标记"""
+        self.dead_stones.clear()
+
+    def confirm_dead_stones(self):
+        """确认死子标记并重新计算分数"""
+        if not self.dead_stones:
+            self.end_game()
+            return
+        # 从棋盘移除死子
+        dead_by_color = {'B': 0, 'W': 0}
+        for (x, y) in self.dead_stones:
+            stone = self.board.get_stone(x, y)
+            if stone:
+                dead_by_color[stone] += 1
+                self.board.set_stone(x, y, None)
+        # 死子计入对方提子
+        self.captures['B'] += dead_by_color['W']
+        self.captures['W'] += dead_by_color['B']
+        self.game_status = 'ended'
+        self.calculate_final_score()
+
     def calculate_final_score(self):
         black_territory, white_territory = self.calculate_territory()
-        
+
         black_stones = 0
         white_stones = 0
         for y in range(self.board.size):
@@ -132,20 +184,21 @@ class GameState:
                     black_stones += 1
                 elif stone == 'W':
                     white_stones += 1
-        
-        black_score = black_stones + black_territory
-        white_score = white_stones + white_territory + 3.75
-        
+
+        black_total = black_stones + black_territory + self.captures['B']
+        white_total = white_stones + white_territory + self.captures['W'] + 3.75
+
         self.final_score = {
-            'black': black_score,
-            'white': white_score,
+            'black': black_total,
+            'white': white_total,
             'black_territory': black_territory,
             'white_territory': white_territory,
             'black_stones': black_stones,
-            'white_stones': white_stones
+            'white_stones': white_stones,
+            'captures': self.captures.copy()
         }
-        
-        if black_score > white_score:
+
+        if black_total > white_total:
             self.winner = 'B'
         else:
             self.winner = 'W'
@@ -218,51 +271,90 @@ class GameState:
         return influence
     
     def estimate_situation(self):
-        influence = self.calculate_influence_map()
-        black_terr = 0
-        white_terr = 0
-        
-        for y in range(self.board.size):
-            for x in range(self.board.size):
-                if self.board.get_stone(x, y) is None:
-                    inf = influence[y][x]
-                    if inf > 0.3:
-                        black_terr += 1
-                    elif inf < -0.3:
-                        white_terr += 1
-        
-        black_score = black_terr + self.captures['B']
-        white_score = white_terr + self.captures['W'] + 7.5
-        
+        """估算当前形势"""
+        # 早期棋局使用影响力估算，后期使用领地计算
+        black_territory, white_territory = self.calculate_territory()
+        total_territory = black_territory + white_territory
+
+        # 领地太少（开局阶段），回退到影响力估算
+        if total_territory < 10 and self.move_count < 40:
+            influence = self.calculate_influence_map()
+            black_terr = 0
+            white_terr = 0
+            for y in range(self.board.size):
+                for x in range(self.board.size):
+                    if self.board.get_stone(x, y) is None:
+                        inf = influence[y][x]
+                        if inf > 0.3:
+                            black_terr += 1
+                        elif inf < -0.3:
+                            white_terr += 1
+            black_territory = max(black_territory, black_terr)
+            white_territory = max(white_territory, white_terr)
+
+        black_score = black_territory + self.captures['B']
+        white_score = white_territory + self.captures['W'] + 7.5
+
         score_diff = black_score - white_score
-        if score_diff > 10:
-            win_rate = 0.9
-        elif score_diff > 5:
-            win_rate = 0.75
-        elif score_diff > 0:
-            win_rate = 0.6
-        elif score_diff > -5:
-            win_rate = 0.4
-        elif score_diff > -10:
-            win_rate = 0.25
-        else:
-            win_rate = 0.1
-        
+
+        # 使用sigmoid函数估值胜率
+        win_rate = 1.0 / (1.0 + math.exp(-score_diff / 5.0))
+
         return {
-            'win_rate': win_rate,
-            'territory': {'black': black_terr, 'white': white_terr}
+            'win_rate': round(win_rate, 3),
+            'territory': {'black': black_territory, 'white': white_territory}
         }
     
     def undo(self):
         if len(self.history) == 0:
             return False
-        
+
         snapshot = self.history.pop()
         self.load_state(snapshot)
+        if self.move_history:
+            self.move_history.pop()
+        self.redo_history.clear()
         return True
+
+    def go_to_move(self, target_index):
+        """回顾模式：跳转到指定步数"""
+        if target_index < 0 or target_index >= len(self.move_history):
+            return False
+        # 从初始状态开始重放到目标步
+        temp_board = Board(self.board_size)
+        temp_history = []
+        for i in range(target_index + 1):
+            mx, my, mc = self.move_history[i]
+            if mx is not None:
+                temp_history.append(temp_board.get_state_hash())
+                temp_board.set_stone(mx, my, mc)
+
+        # 将当前棋盘设为目标状态
+        self.board = temp_board
+        self.current_player = 'W' if self.move_history[target_index][2] == 'B' else 'B'
+        self.last_move = (self.move_history[target_index][0], self.move_history[target_index][1])
+        self.review_index = target_index
+        return True
+
+    def review_prev(self):
+        """回顾模式：上一步"""
+        new_idx = self.review_index - 1
+        if new_idx < -1:
+            return False
+        if new_idx == -1:
+            self.reset()
+            self.review_index = -1
+            return True
+        return self.go_to_move(new_idx)
+
+    def review_next(self):
+        """回顾模式：下一步"""
+        if self.review_index >= len(self.move_history) - 1:
+            return False
+        return self.go_to_move(self.review_index + 1)
     
     def reset(self):
-        self.board = Board()
+        self.board = Board(self.board_size)
         self.current_player = 'B'
         self.move_count = 0
         self.captures = {'B': 0, 'W': 0}
@@ -274,7 +366,13 @@ class GameState:
         self.final_score = None
         self.moves_since_last_capture = 0
         self.moves_since_last_big_move = 0
-    
+        self.last_move = None
+        self.ko_history = []
+        self.move_history = []
+        self.redo_history = []
+        self.review_index = -1
+        self.dead_stones = set()
+
     def save_state(self):
         snapshot = self.get_state_snapshot()
         self.history.append(snapshot)
@@ -291,10 +389,13 @@ class GameState:
             'consecutive_passes': self.consecutive_passes,
             'winner': self.winner,
             'final_score': self.final_score,
-            'ko_history': self.ko_history.copy()
+            'ko_history': self.ko_history.copy(),
+            'last_move': self.last_move,
+            'board_size': self.board_size
         }
-    
+
     def load_state(self, snapshot):
+        self.board_size = snapshot.get('board_size', 19)
         self.board = snapshot['board'].copy()
         self.current_player = snapshot['current_player']
         self.move_count = snapshot['move_count']
@@ -305,6 +406,7 @@ class GameState:
         self.winner = snapshot.get('winner', None)
         self.final_score = snapshot.get('final_score', None)
         self.ko_history = snapshot.get('ko_history', [])
+        self.last_move = snapshot.get('last_move', None)
     
     def save_game(self, filename='data/saves/savegame.pkl'):
         os.makedirs(os.path.dirname(filename), exist_ok=True)

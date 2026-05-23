@@ -57,7 +57,8 @@ class Button:
         self.click_animation = 0.0
         self.hover_animation = 0.0
         self.active = True
-    
+        self.visible = True  # False 时完全不绘制
+
     def update(self, dt):
         target_hover = 1.0 if self.is_hovered else 0.0
         self.hover_animation += (target_hover - self.hover_animation) * dt * 8
@@ -68,6 +69,8 @@ class Button:
             self.click_animation *= (1.0 - dt * 8)
     
     def draw(self, surface):
+        if not self.visible:
+            return
         # 非活跃状态显示灰色
         if not self.active:
             inactive_color = (35, 35, 45)
@@ -138,6 +141,8 @@ class DifficultyButton(Button):
         self.is_selected = is_selected
     
     def draw(self, surface):
+        if not self.visible:
+            return
         if self.is_selected:
             current_color = Colors.GOLD_DARK
             current_border = Colors.GOLD_LIGHT
@@ -190,6 +195,8 @@ class ToggleButton(Button):
         self.text = self.text_on if self.is_on else self.text_off
     
     def draw(self, surface):
+        if not self.visible:
+            return
         if self.is_on:
             current_color = Colors.GREEN
             current_border = (100, 220, 140)

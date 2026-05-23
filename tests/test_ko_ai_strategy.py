@@ -1,95 +1,70 @@
-"""
-AI劫材策略测试套件
-
-包含：
-- 劫点检测
-- 劫材寻找
-- 劫材策略选择
-"""
-
+"""AI劫材策略测试套件"""
 import pytest
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from game.board import Board
 from game.rules import Rules
-from game.ai import EasyAI, MediumAI, HardAI
+from game.ai import EasyAI, MediumAI
 
-def test_ai_detects_ko_point():
-    """测试AI检测到劫点"""
+
+@pytest.fixture
+def ko_board():
+    """构造一个含劫的棋盘"""
     board = Board(9)
-    rules = Rules()
-    ai = EasyAI()
-    
     board.set_stone(3, 1, 'B')
     board.set_stone(2, 2, 'B')
     board.set_stone(4, 2, 'B')
     board.set_stone(3, 3, 'B')
     board.set_stone(3, 2, 'W')
-    
-    ko_point = (2, 2)
-    
-    ko_threats = ai.find_ko_threats(board, 'B', ko_point, rules)
-    
-    assert isinstance(ko_threats, list), "应该返回劫材列表"
+    return board
 
-def test_easy_ai_uses_ko_strategy():
-    """测试EasyAI使用劫材策略"""
-    board = Board(9)
-    rules = Rules()
-    ai = EasyAI()
-    
-    board.set_stone(3, 1, 'B')
-    board.set_stone(2, 2, 'B')
-    board.set_stone(4, 2, 'B')
-    board.set_stone(3, 3, 'B')
-    board.set_stone(3, 2, 'W')
-    
-    ko_point = (2, 2)
-    
-    move = ai.get_move(board, 'B', rules, ko_point)
-    
-    assert move is not None, "AI应该返回劫材位置"
-    assert move != ko_point, "劫材不应该是劫点本身"
 
-def test_medium_ai_prefers_best_ko_threat():
-    """测试MediumAI选择最佳劫材"""
-    board = Board(9)
-    rules = Rules()
-    ai = MediumAI()
-    
-    board.set_stone(3, 1, 'B')
-    board.set_stone(2, 2, 'B')
-    board.set_stone(4, 2, 'B')
-    board.set_stone(3, 3, 'B')
-    board.set_stone(3, 2, 'W')
-    
-    ko_point = (2, 2)
-    
-    move = ai.get_move(board, 'B', rules, ko_point)
-    
-    assert move is not None, "AI应该返回劫材位置"
-    assert move != ko_point, "劫材不应该是劫点本身"
+class TestKoThreatDetection:
+    """测试劫材检测"""
 
-def test_ai_without_ko_plays_normally():
-    """测试AI在无劫时正常落子"""
-    board = Board(9)
-    rules = Rules()
-    ai = EasyAI()
-    
-    board.set_stone(3, 3, 'B')
-    board.set_stone(3, 4, 'B')
-    
-    ko_point = None
-    
-    move = ai.get_move(board, 'B', rules, ko_point)
-    
-    assert move is not None, "AI应该返回落子位置"
+    def test_find_ko_threats_returns_list(self, ko_board):
+        """验证劫材搜索返回列表"""
+        rules = Rules()
+        ai = EasyAI()
 
-if __name__ == '__main__':
-    test_ai_detects_ko_point()
-    test_easy_ai_uses_ko_strategy()
-    test_medium_ai_prefers_best_ko_threat()
-    test_ai_without_ko_plays_normally()
-    print("\n所有劫材策略测试通过！")
+        ko_threats = ai.find_ko_threats(ko_board, 'B', (2, 2), rules)
+        assert isinstance(ko_threats, list), "应该返回劫材列表"
+
+
+class TestEasyAIWithKo:
+    """测试EasyAI劫材策略"""
+
+    def test_easy_ai_finds_ko_threat(self, ko_board):
+        """验证EasyAI在劫存在时找到劫材"""
+        rules = Rules()
+        ai = EasyAI()
+
+        move = ai.get_move(ko_board, 'B', rules, (2, 2))
+        assert move is not None, "AI应该返回劫材位置"
+        assert move != (2, 2), "劫材不应该是劫点本身"
+
+
+class TestMediumAIWithKo:
+    """测试MediumAI劫材策略"""
+
+    def test_medium_ai_finds_ko_threat(self, ko_board):
+        """验证MediumAI在劫存在时找到劫材"""
+        rules = Rules()
+        ai = MediumAI()
+
+        move = ai.get_move(ko_board, 'B', rules, (2, 2))
+        assert move is not None, "AI应该返回劫材位置"
+        assert move != (2, 2), "劫材不应该是劫点本身"
+
+
+class TestAINoKo:
+    """测试AI在无劫时行为"""
+
+    def test_ai_plays_normally_without_ko(self):
+        """验证AI在无劫时正常落子"""
+        board = Board(9)
+        rules = Rules()
+        ai = EasyAI()
+        board.set_stone(3, 3, 'B')
+        board.set_stone(3, 4, 'B')
+
+        move = ai.get_move(board, 'B', rules, None)
+        assert move is not None, "AI应该返回落子位置"

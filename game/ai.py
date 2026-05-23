@@ -118,28 +118,69 @@ class EasyAI(AI):
     
     def get_move(self, board, color, rules, ko_point=None) -> Optional[Tuple[int, int]]:
         valid_moves = self.get_all_valid_moves(board, color, rules, ko_point)
-        
+
         if not valid_moves:
             return None
-        
+
         if ko_point is not None:
             ko_threats = self.find_ko_threats(board, color, ko_point, rules)
             if ko_threats:
-                return random.choice(ko_threats)
-        
+                # 选择威胁最大的劫材
+                from game.ko_utils import KoUtils
+                best = max(ko_threats, key=lambda pos: KoUtils._evaluate_ko_threat(board, pos[0], pos[1], color))
+                return best
+
+        # 优先吃子 - 选择能吃掉最多子的位置
         capturing_moves = self.find_capturing_moves(board, color, rules, ko_point)
         if capturing_moves:
-            return random.choice(capturing_moves)
-        
+            scored = []
+            for move in capturing_moves:
+                test_board = board.copy()
+                test_board.set_stone(move[0], move[1], color)
+                captures = rules.check_captures(test_board, move[0], move[1], color)
+                total = sum(len(g) for g in captures)
+                scored.append((move, total))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            # 75%概率选最好的，25%随机选前3
+            if random.random() < 0.75:
+                return scored[0][0]
+            return random.choice(scored[:min(3, len(scored))])[0]
+
+        # 防守 - 选择能增加最多气的走法
         defensive_moves = self.find_defensive_moves(board, color, rules, ko_point)
         if defensive_moves:
-            return random.choice(defensive_moves)
-        
+            scored = []
+            for move in defensive_moves:
+                test_board = board.copy()
+                test_board.set_stone(move[0], move[1], color)
+                new_group = test_board.get_group(move[0], move[1])
+                libs = test_board.get_liberties(new_group)
+                scored.append((move, libs))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            return scored[0][0]
+
+        # 开局走星位
         opening_moves = self.find_opening_moves(board)
         if opening_moves:
             return random.choice(opening_moves)
-        
-        return random.choice(valid_moves)
+
+        # 选靠近棋子的位置，不走孤棋
+        scored_moves = []
+        for move in valid_moves:
+            x, y = move
+            neighbors = 0
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = x + dx, y + dy
+                    if board.is_valid_position(nx, ny) and not board.is_empty(nx, ny):
+                        neighbors += 1
+            scored_moves.append((move, neighbors))
+
+        scored_moves.sort(key=lambda x: x[1], reverse=True)
+        top = scored_moves[:max(5, len(scored_moves) // 3)]
+        return random.choice(top)[0]
     
     def evaluate_position(self, board, color):
         opponent = 'W' if color == 'B' else 'B'
@@ -184,6 +225,7 @@ class MediumAI(AI):
         self.max_depth = 3
         self.time_limit = 2.5
         self.start_time = 0
+        self._eval_cache = {}
     
     def get_position_value(self, x, y, board_size):
         center = board_size // 2
@@ -444,7 +486,7 @@ class MCTSNode:
         self.wins = 0
         self.visits = 0
         self.untried_moves = None
-    
+
     def get_untried_moves(self):
         if self.untried_moves is None:
             self.untried_moves = []
@@ -453,58 +495,102 @@ class MCTSNode:
                     if self.rules.is_valid_move(self.board, x, y, self.color, self.ko_point):
                         self.untried_moves.append((x, y))
         return self.untried_moves
-    
+
     def is_fully_expanded(self):
         return len(self.get_untried_moves()) == 0
-    
+
     def is_terminal(self):
         if not self.get_untried_moves() and not self.children:
             return True
-        
         for y in range(self.board.size):
             for x in range(self.board.size):
                 if self.rules.is_valid_move(self.board, x, y, self.color, self.ko_point):
                     return False
-        
         return True
-    
+
+    def place_with_captures(self, board, x, y, color, ko_point=None):
+        """落子并处理吃子，返回新的劫点"""
+        if not self.rules.is_valid_move(board, x, y, color, ko_point):
+            return None
+        board.set_stone(x, y, color)
+        captures = self.rules.check_captures(board, x, y, color)
+        for group in captures:
+            for (cx, cy) in group:
+                board.set_stone(cx, cy, None)
+        # 检测是否形成劫
+        if len(captures) == 1 and len(captures[0]) == 1:
+            return captures[0]
+        return None
+
     def simulate(self):
         sim_board = self.board.copy()
         sim_color = self.color
-        
+        sim_ko = self.ko_point
+        rules = self.rules
+
         for _ in range(50):
             valid_moves = []
             for y in range(sim_board.size):
                 for x in range(sim_board.size):
-                    if self.rules.is_valid_move(sim_board, x, y, sim_color, self.ko_point):
+                    if rules.is_valid_move(sim_board, x, y, sim_color, sim_ko):
                         valid_moves.append((x, y))
-            
             if not valid_moves:
                 break
-            
-            move = random.choice(valid_moves)
-            sim_board.set_stone(move[0], move[1], sim_color)
+            # 启发式偏置：优先选吃子和连接
+            if len(valid_moves) > 10:
+                scored = []
+                for mx, my in valid_moves:
+                    score = 0
+                    # 吃子奖励
+                    test_b = sim_board.copy()
+                    test_b.set_stone(mx, my, sim_color)
+                    caps = rules.check_captures(test_b, mx, my, sim_color)
+                    if caps:
+                        score += sum(len(g) for g in caps) * 50
+                    # 靠近棋子奖励
+                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        nx, ny = mx + dx, my + dy
+                        if sim_board.is_valid_position(nx, ny) and not sim_board.is_empty(nx, ny):
+                            score += 5
+                    scored.append(score)
+                # 按分数偏置选择
+                max_score = max(scored)
+                if max_score > 0:
+                    candidates = [v for v, s in zip(valid_moves, scored) if s >= max_score * 0.8]
+                    move = random.choice(candidates)
+                else:
+                    move = random.choice(valid_moves)
+            else:
+                move = random.choice(valid_moves)
+            new_ko = self.place_with_captures(sim_board, move[0], move[1], sim_color, sim_ko)
+            if new_ko is not None:
+                sim_ko = new_ko
+            else:
+                sim_ko = None
             sim_color = 'W' if sim_color == 'B' else 'B'
-        
-        return self.evaluate(sim_board, self.color)
-    
-    def evaluate(self, board, color):
+
+        return self._evaluate_sim(sim_board, self.color)
+
+    def _evaluate_sim(self, board, color):
+        """模拟评估：更真实的局面评分"""
         opponent = 'W' if color == 'B' else 'B'
-        return self._count_stones(board, color) - self._count_stones(board, opponent)
-    
-    def _count_stones(self, board, color):
-        count = 0
-        for y in range(board.size):
-            for x in range(board.size):
-                if board.get_stone(x, y) == color:
-                    count += 1
-        return count
+        score = 0
+        all_groups = board.get_all_groups()
+        for group in all_groups:
+            group_color = board.get_stone(group[0][0], group[0][1])
+            group_size = len(group)
+            liberties = board.get_liberties(group)
+            multiplier = 1 if group_color == color else -1
+            score += group_size * 3 * multiplier
+            if liberties <= 1:
+                score -= 20 * multiplier
+        return score
 
 
 class HardAI(AI):
     def __init__(self):
-        self.mcts_iterations = 500
-        self.mcts_time_limit = 4.0
+        self.mcts_iterations = 2000
+        self.mcts_time_limit = 8.0
         self.start_time = 0
     
     def evaluate_position(self, board, color):
@@ -544,53 +630,77 @@ class HardAI(AI):
         return score
     
     def mcts(self, board, color, rules, ko_point):
-        root = MCTSNode(board, color, rules, ko_point)
-        
+        root = MCTSNode(board.copy(), color, rules, ko_point)
+
         end_time = time.time() + self.mcts_time_limit
-        
+
         for _ in range(self.mcts_iterations):
             if time.time() > end_time:
                 break
-            
+
             node = root
-            sim_board = board.copy()
-            sim_color = color
-            sim_ko_point = ko_point
-            
+            sim_board = node.board.copy()
+            sim_color = node.color
+            sim_ko = node.ko_point
+            sim_node_ko = sim_ko
+
+            # Selection: 遍历已展开节点
             while node.children:
-                node = max(node.children, key=lambda n: n.wins / n.visits if n.visits > 0 else 0)
-                sim_board.set_stone(node.move[0], node.move[1], sim_color)
+                node = max(node.children, key=lambda n: (n.wins / (n.visits + 1)) + math.sqrt(2 * math.log(node.visits + 1) / (n.visits + 1)))
+                # 模拟执行该步落子（含吃子），传递当前劫点
+                sim_node_ko = node.place_with_captures(sim_board, node.move[0], node.move[1], sim_color, sim_ko)
+                sim_ko = sim_node_ko
                 sim_color = 'W' if sim_color == 'B' else 'B'
-            
+
+            # Expansion: 展开一个未尝试的走法
             if node.get_untried_moves():
-                move = random.choice(node.get_untried_moves())
-                new_node = MCTSNode(sim_board, sim_color, rules, sim_ko_point, parent=node, move=move)
+                move = node.get_untried_moves().pop(random.randint(0, len(node.get_untried_moves()) - 1))
+                new_node = MCTSNode(sim_board.copy(), sim_color, rules, sim_node_ko, parent=node, move=move)
                 node.children.append(new_node)
                 node = new_node
-                sim_board.set_stone(move[0], move[1], sim_color)
+                sim_node_ko = node.place_with_captures(sim_board, move[0], move[1], sim_color, sim_ko)
+                sim_ko = sim_node_ko
                 sim_color = 'W' if sim_color == 'B' else 'B'
-            
+
+            # Simulation: 随机模拟到终局
             result = node.simulate()
             node.wins += result
             node.visits += 1
-            
+
+            # Backpropagation: 将结果传播到所有祖先节点
             while node.parent:
                 node = node.parent
+                node.wins += result
                 node.visits += 1
-        
+
         if not root.children:
             return None
-        
+
         best_child = max(root.children, key=lambda n: n.visits)
         return best_child.move
     
+    def _get_opening_move(self, board, color):
+        """开局阶段选择星位或常见定式位置"""
+        if board.size >= 9:
+            openings = [(3, 3), (3, 9), (3, 15), (9, 3), (9, 9), (9, 15), (15, 3), (15, 9), (15, 15)]
+            if board.size == 9:
+                openings = [(2, 2), (2, 6), (4, 4), (6, 2), (6, 6)]
+            elif board.size == 13:
+                openings = [(3, 3), (3, 6), (3, 9), (6, 3), (6, 6), (6, 9), (9, 3), (9, 6), (9, 9)]
+            # 检查棋盘上总棋子数是否小于等于2
+            total = sum(1 for y in range(board.size) for x in range(board.size) if not board.is_empty(x, y))
+            if total <= 1:
+                for ox, oy in openings:
+                    if board.is_empty(ox, oy):
+                        return (ox, oy)
+        return None
+
     def get_move(self, board, color, rules, ko_point=None) -> Optional[Tuple[int, int]]:
         if ko_point is not None:
             ko_threats = self.find_ko_threats(board, color, ko_point, rules)
             if ko_threats:
                 best_threat = None
                 best_score = -float('inf')
-                
                 for threat in ko_threats:
                     test_board = board.copy()
                     test_board.set_stone(threat[0], threat[1], color)
@@ -598,20 +708,23 @@ class HardAI(AI):
                     if score > best_score:
                         best_score = score
                         best_threat = threat
-                
                 if best_threat:
                     return best_threat
-        
+
+        # 开局走星位
+        opening = self._get_opening_move(board, color)
+        if opening:
+            return opening
+
         all_valid = []
         for y in range(board.size):
             for x in range(board.size):
                 if rules.is_valid_move(board, x, y, color, ko_point):
                     all_valid.append((x, y))
-        
         if not all_valid:
             return None
-        
-        opponent = 'W' if color == 'B' else 'B'
+
+        # 吃子优先
         for x, y in all_valid:
             test_board = board.copy()
             test_board.set_stone(x, y, color)
@@ -620,11 +733,11 @@ class HardAI(AI):
                 total_captured = sum(len(g) for g in captures)
                 if total_captured >= 2:
                     return (x, y)
-        
+
         move = self.mcts(board, color, rules, ko_point)
         if move:
             return move
-        
+
         return random.choice(all_valid)
     
     def get_best_moves_with_scores(self, board, color, rules, ko_point=None):

@@ -44,28 +44,44 @@ def get_chinese_font(size):
     return pygame.font.Font(None, size)
 
 class Renderer:
-    def __init__(self, screen, board_x, board_y, board_size):
+    def __init__(self, screen, board_x, board_y, board_size, grid_size=19):
         self.screen = screen
         self.board_x = board_x
         self.board_y = board_y
         self.board_size = board_size
         self.board_width = board_size
         self.board_height = board_size
-        self.grid_size = 19
+        self.grid_size = grid_size
         self.cell_size = (self.board_width - 100) // (self.grid_size - 1)
-        self.stone_radius = self.cell_size // 2 - 4
-        self.star_point_radius = 5
-        
+        self.stone_radius = max(8, self.cell_size // 2 - 4)
+        self.star_point_radius = max(3, self.cell_size // 16)
+
         self.animation_time = 0
         self.particles = []
-        
-        self.star_points = [
-            (3, 3), (3, 9), (3, 15),
-            (9, 3), (9, 9), (9, 15),
-            (15, 3), (15, 9), (15, 15)
-        ]
-        
+
+        # 根据棋盘大小选择星位
+        if grid_size == 19:
+            self.star_points = [
+                (3, 3), (3, 9), (3, 15),
+                (9, 3), (9, 9), (9, 15),
+                (15, 3), (15, 9), (15, 15)
+            ]
+        elif grid_size == 13:
+            self.star_points = [
+                (3, 3), (3, 6), (3, 9),
+                (6, 3), (6, 6), (6, 9),
+                (9, 3), (9, 6), (9, 9)
+            ]
+        elif grid_size == 9:
+            self.star_points = [
+                (2, 2), (2, 6), (4, 4),
+                (6, 2), (6, 6)
+            ]
+        else:
+            self.star_points = []
+
         self.board_texture = self._generate_board_texture()
+        self._overlay_buttons = {}
     
     def _generate_board_texture(self):
         texture = pygame.Surface((self.board_width, self.board_height))
@@ -110,6 +126,43 @@ class Renderer:
                 'alpha': 255
             })
     
+    def draw_coordinates(self, surface):
+        """绘制棋盘坐标标签 (A-T, 1-19)"""
+        start_x = self.board_x + 50
+        start_y = self.board_y + 50
+        font = get_chinese_font(18)
+
+        # 列标签 A-T (跳过 I)
+        for i in range(self.grid_size):
+            label = chr(ord('A') + i) if i < 8 else chr(ord('A') + i + 1)
+            x = start_x + i * self.cell_size
+            coord_surface = font.render(label, True, Colors.GOLD)
+            coord_rect = coord_surface.get_rect(center=(x, start_y - 30))
+            surface.blit(coord_surface, coord_rect)
+            coord_rect = coord_surface.get_rect(center=(x, start_y + (self.grid_size - 1) * self.cell_size + 30))
+            surface.blit(coord_surface, coord_rect)
+
+        # 行标签 1-19
+        for i in range(self.grid_size):
+            label = str(self.grid_size - i)
+            y = start_y + i * self.cell_size
+            coord_surface = font.render(label, True, Colors.GOLD)
+            coord_rect = coord_surface.get_rect(center=(start_x - 30, y))
+            surface.blit(coord_surface, coord_rect)
+            coord_rect = coord_surface.get_rect(center=(start_x + (self.grid_size - 1) * self.cell_size + 30, y))
+            surface.blit(coord_surface, coord_rect)
+
+    def draw_last_move(self, surface, last_move):
+        """绘制最后落子标记"""
+        if last_move is None:
+            return
+        screen_pos = self.board_to_screen(last_move[0], last_move[1])
+        if screen_pos is None:
+            return
+        cx, cy = screen_pos
+        marker_size = self.stone_radius // 3
+        pygame.draw.circle(surface, (255, 80, 80), (cx, cy), marker_size)
+
     def draw_board(self, surface):
         bg_rect = pygame.Rect(0, 0, surface.get_width(), surface.get_height())
         pygame.draw.rect(surface, Colors.DARK_BG, bg_rect)
@@ -372,19 +425,20 @@ class Renderer:
         
         return panel_rect
     
-    def draw_current_player(self, surface, current_player, move_count, captures, game_status=None, winner=None, final_score=None, info_y=None):
+    def draw_current_player(self, surface, current_player, move_count, captures, game_status=None, winner=None, final_score=None, info_y=None, info_x=None, panel_width=360, panel_height=None):
         font = get_chinese_font(28)
         small_font = get_chinese_font(24)
-        
-        info_x = self.board_x + self.board_width + 50
+
+        if info_x is None:
+            info_x = self.board_x + self.board_width + 50
         if info_y is None:
             info_y = self.board_y + 30
-        
-        panel_width = 260
-        panel_height = 300 if game_status == 'ended' else 200
-        
-        self.draw_sidebar_panel(surface, info_x - 15, info_y - 15, panel_width, panel_height, "游戏状态")
-        
+
+        if panel_height is None:
+            panel_height = 300 if game_status == 'ended' else 200
+
+        self.draw_sidebar_panel(surface, info_x, info_y, panel_width, panel_height, "游戏状态")
+
         info_x += 5
         info_y += 35
         
@@ -443,39 +497,266 @@ class Renderer:
             surface.blit(black_capture_surface, (info_x, info_y + 70))
             surface.blit(white_capture_surface, (info_x, info_y + 95))
     
-    def draw_situation_eval(self, surface, win_rate, territory_est, info_x, info_y):
-        font = get_chinese_font(24)
-        title_font = get_chinese_font(26)
-        
-        self.draw_sidebar_panel(surface, info_x - 15, info_y - 15, 260, 110, "形势判断")
-        
+    def draw_situation_eval(self, surface, win_rate, territory_est, info_x, info_y, panel_width=360, panel_height=110):
+        big_font = get_chinese_font(28)
+        small_font = get_chinese_font(24)
+
+        self.draw_sidebar_panel(surface, info_x, info_y, panel_width, panel_height, "形势判断")
+
         info_x += 5
         info_y += 35
-        
-        title_surface = title_font.render("形势评估", True, Colors.GOLD)
-        surface.blit(title_surface, (info_x, info_y - 5))
-        
+
         if win_rate is not None:
             wr_text = f"黑胜率: {win_rate:.1%}"
             wr_color = Colors.GREEN if win_rate > 0.5 else Colors.RED if win_rate < 0.5 else Colors.TEXT_LIGHT
-            wr_surface = font.render(wr_text, True, wr_color)
-            surface.blit(wr_surface, (info_x, info_y + 20))
-        
+            wr_surface = big_font.render(wr_text, True, wr_color)
+            surface.blit(wr_surface, (info_x, info_y))
+
         if territory_est is not None:
             terr_text = f"黑{territory_est['black']}目 vs 白{territory_est['white']}目"
-            terr_surface = font.render(terr_text, True, Colors.TEXT_LIGHT)
-            surface.blit(terr_surface, (info_x, info_y + 45))
+            terr_surface = small_font.render(terr_text, True, Colors.TEXT_LIGHT)
+            surface.blit(terr_surface, (info_x, info_y + 35))
     
-    def draw_ai_thinking(self, surface, x, y, width):
+    def draw_timer(self, surface, player_times, info_x, info_y, panel_width=360):
+        """绘制双方用时"""
+        font = get_chinese_font(22)
+        self.draw_sidebar_panel(surface, info_x, info_y, panel_width, 65, "计时")
+        y = info_y + 35
+        for i, (color, label) in enumerate([('B', '黑方'), ('W', '白方')]):
+            remaining = max(0, int(player_times[color]))
+            mins, secs = divmod(remaining, 60)
+            time_str = f"{label}: {mins:02d}:{secs:02d}"
+            is_low = remaining < 30
+            color_val = (255, 80, 80) if is_low else (200, 200, 210)
+            s = font.render(time_str, True, color_val)
+            x = info_x + 20 + i * 178  # 均分360px宽
+            surface.blit(s, (x, y))
+
+    def draw_ai_thinking(self, surface, x, y, width, elapsed=0):
         font = get_chinese_font(24)
-        
+        small_font = get_chinese_font(18)
+
         dots = int((self.animation_time * 3) % 4)
         thinking_text = f"AI思考中{'.' * dots}"
         text_surface = font.render(thinking_text, True, Colors.GOLD_LIGHT)
-        
-        bg_rect = pygame.Rect(x, y, width, 40)
+
+        bg_rect = pygame.Rect(x, y, width, 55)
         pygame.draw.rect(surface, (40, 40, 50), bg_rect, border_radius=8)
         pygame.draw.rect(surface, Colors.GOLD, bg_rect, 1, border_radius=8)
-        
-        text_rect = text_surface.get_rect(center=bg_rect.center)
+
+        text_rect = text_surface.get_rect(center=(bg_rect.centerx, bg_rect.centery - 8))
         surface.blit(text_surface, text_rect)
+
+        if elapsed:
+            time_text = f"{elapsed:.1f}s"
+            time_surface = small_font.render(time_text, True, (180, 180, 190))
+            time_rect = time_surface.get_rect(center=(bg_rect.centerx, bg_rect.centery + 18))
+            surface.blit(time_surface, time_rect)
+
+    def draw_game_over_overlay(self, surface, winner, final_score, move_count):
+        """绘制终局弹窗"""
+        w, h = surface.get_width(), surface.get_height()
+        overlay = pygame.Surface((w, h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        surface.blit(overlay, (0, 0))
+
+        # 面板尺寸
+        pw, ph = 480, 380
+        px, py = (w - pw) // 2, (h - ph) // 2
+        pygame.draw.rect(surface, (28, 28, 40), (px, py, pw, ph), border_radius=16)
+        pygame.draw.rect(surface, Colors.GOLD, (px, py, pw, ph), 2, border_radius=16)
+
+        tf = get_chinese_font(30)
+        sf = get_chinese_font(22)
+        ssf = get_chinese_font(18)
+
+        # 标题
+        title = "游戏结束" if winner else "平局"
+        ts = tf.render(title, True, Colors.GOLD_LIGHT)
+        surface.blit(ts, (px + 30, py + 25))
+
+        # 分隔线
+        pygame.draw.line(surface, (60, 60, 75), (px + 30, py + 65), (px + pw - 30, py + 65), 1)
+
+        # 获胜者徽章
+        if winner:
+            wt = "黑方 获胜" if winner == 'B' else "白方 获胜"
+            ws = sf.render(wt, True, Colors.GOLD_LIGHT)
+            badge = pygame.Rect(0, 0, 160, 36)
+            badge.center = (px + pw // 2, py + 100)
+            pygame.draw.rect(surface, (50, 50, 65), badge, border_radius=18)
+            pygame.draw.rect(surface, Colors.GOLD, badge, 1, border_radius=18)
+            surface.blit(ws, ws.get_rect(center=badge.center))
+
+        # 分数表
+        if final_score:
+            col_x = [px + 60, px + 240, px + 360]
+            row_y = py + 135
+            f = ssf
+            labels = ["棋子", "领地", "小计"]
+            black_vals = [
+                str(final_score.get('black_stones', 0)),
+                str(final_score.get('black_territory', 0)),
+                str(final_score.get('black_stones', 0) + final_score.get('black_territory', 0)),
+            ]
+            white_vals = [
+                str(final_score.get('white_stones', 0)),
+                str(final_score.get('white_territory', 0)),
+                str(final_score.get('white_stones', 0) + final_score.get('white_territory', 0)),
+            ]
+
+            # 表头
+            for txt, cx in [("项目", col_x[0]), ("黑方", col_x[1]), ("白方", col_x[2])]:
+                surface.blit(f.render(txt, True, (160, 160, 180)), (cx, row_y))
+
+            # 分隔线
+            pygame.draw.line(surface, (50, 50, 65), (px + 50, row_y + 28), (px + pw - 50, row_y + 28), 1)
+
+            # 数据行
+            for i in range(3):
+                ry = row_y + 35 + i * 28
+                surface.blit(f.render(labels[i], True, (190, 190, 200)), (col_x[0], ry))
+                surface.blit(f.render(black_vals[i], True, (210, 210, 220)), (col_x[1], ry))
+                surface.blit(f.render(white_vals[i], True, (210, 210, 220)), (col_x[2], ry))
+
+            # 贴目
+            ry = row_y + 35 + 3 * 28
+            surface.blit(f.render("贴目", True, (190, 190, 200)), (col_x[0], ry))
+            surface.blit(f.render("+3.75", True, (210, 210, 220)), (col_x[2], ry))
+
+            # 分隔线
+            pygame.draw.line(surface, (60, 60, 75), (px + 50, ry + 32), (px + pw - 50, ry + 32), 1)
+
+            # 总分
+            ry += 40
+            surface.blit(sf.render("总分", True, Colors.GOLD_LIGHT), (col_x[0], ry))
+            surface.blit(sf.render(f"{final_score.get('black', 0):.1f}", True, Colors.GOLD_LIGHT), (col_x[1], ry))
+            surface.blit(sf.render(f"{final_score.get('white', 0):.1f}", True, Colors.GOLD_LIGHT), (col_x[2], ry))
+
+        # 按钮
+        by = py + ph - 55
+        btn_w, btn_h = 140, 38
+        mx = px + pw // 2
+        restart_rect = pygame.Rect(mx - btn_w - 10, by, btn_w, btn_h)
+        review_rect = pygame.Rect(mx + 10, by, btn_w, btn_h)
+
+        for rect, label, color in [(restart_rect, "重新开始", Colors.GOLD),
+                                    (review_rect, "复盘", Colors.GOLD)]:
+            hovered = rect.collidepoint(pygame.mouse.get_pos())
+            bg = (55, 55, 70) if hovered else (45, 45, 60)
+            bc = Colors.GOLD_LIGHT if hovered else color
+            pygame.draw.rect(surface, bg, rect, border_radius=8)
+            pygame.draw.rect(surface, bc, rect, 2, border_radius=8)
+            txt = sf.render(label, True, Colors.GOLD_LIGHT)
+            surface.blit(txt, txt.get_rect(center=rect.center))
+
+        self._overlay_buttons = {'restart': restart_rect, 'review': review_rect}
+
+    def draw_territory_overlay(self, surface, final_score, board):
+        """在棋盘上绘制领地区域"""
+        if not final_score:
+            return
+        start_x = self.board_x + 50
+        start_y = self.board_y + 50
+        from game.game_state import GameState
+        gs = GameState()
+        gs.board = board
+        black_territory, white_territory = gs.calculate_territory()
+        # 为了可视化，重新执行flood fill获取具体位置
+        visited = set()
+        territory_positions = {'B': [], 'W': []}
+        for y in range(board.size):
+            for x in range(board.size):
+                if (x, y) not in visited and board.is_empty(x, y):
+                    terr_set = set()
+                    border_colors = set()
+                    stack = [(x, y)]
+                    while stack:
+                        cx, cy = stack.pop()
+                        if (cx, cy) in visited or not board.is_valid_position(cx, cy):
+                            continue
+                        stone = board.get_stone(cx, cy)
+                        if stone is not None:
+                            border_colors.add(stone)
+                            continue
+                        if (cx, cy) in terr_set:
+                            continue
+                        terr_set.add((cx, cy))
+                        visited.add((cx, cy))
+                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            stack.append((cx + dx, cy + dy))
+                    if len(border_colors) == 1:
+                        owner = border_colors.pop()
+                        territory_positions[owner].extend(list(terr_set))
+
+        for color, positions in territory_positions.items():
+            fill_color = (80, 120, 255, 60) if color == 'B' else (255, 100, 100, 60)
+            for (tx, ty) in positions:
+                cx = start_x + tx * self.cell_size
+                cy = start_y + ty * self.cell_size
+                s = pygame.Surface((self.cell_size, self.cell_size), pygame.SRCALPHA)
+                pygame.draw.rect(s, fill_color, (0, 0, self.cell_size, self.cell_size), border_radius=2)
+                surface.blit(s, (cx - self.cell_size // 2, cy - self.cell_size // 2))
+
+    def draw_dead_stone_markers(self, surface, dead_stones):
+        """在死子上绘制红色 X 标记"""
+        for (x, y) in dead_stones:
+            screen_pos = self.board_to_screen(x, y)
+            if screen_pos is None:
+                continue
+            cx, cy = screen_pos
+            size = self.stone_radius - 2
+            color = (255, 50, 50)
+            thickness = max(2, self.stone_radius // 6)
+            pygame.draw.line(surface, color, (cx - size, cy - size), (cx + size, cy + size), thickness)
+            pygame.draw.line(surface, color, (cx + size, cy - size), (cx - size, cy + size), thickness)
+
+    def draw_review_overlay(self, surface, move_history, current_index, info_y, sidebar_x):
+        """绘制复盘界面：步数导航 + 历史列表"""
+        font = get_chinese_font(24)
+        small_font = get_chinese_font(20)
+
+        # 顶部提示条
+        bar = pygame.Rect(0, 0, surface.get_width(), 50)
+        pygame.draw.rect(surface, (30, 30, 45), bar)
+        pygame.draw.rect(surface, (212, 175, 55), bar, 2)
+
+        total = len(move_history)
+        text = font.render(f"复盘模式 — 第 {current_index + 1}/{total} 手", True, (255, 223, 128))
+        text_rect = text.get_rect(center=(surface.get_width() // 2, 25))
+        surface.blit(text, text_rect)
+
+        # 步数滑块
+        slider_x, slider_y = 200, surface.get_height() - 40
+        slider_w = surface.get_width() - 400
+        pygame.draw.line(surface, (100, 100, 120), (slider_x, slider_y), (slider_x + slider_w, slider_y), 3)
+        if total > 1:
+            progress = current_index / (total - 1)
+            dot_x = int(slider_x + progress * slider_w)
+            pygame.draw.circle(surface, (255, 223, 128), (dot_x, slider_y), 10)
+
+        # 侧边历史面板
+        panel_x = sidebar_x
+        panel_y = info_y - 15
+        panel_w = 260
+        panel_h = 200
+        self.draw_sidebar_panel(surface, panel_x, panel_y, panel_w, panel_h, "走法历史")
+
+        start_idx = max(0, current_index - 7)
+        end_idx = min(total, start_idx + 9)
+        y_off = panel_y + 40
+        for i in range(start_idx, end_idx):
+            mx, my, mc = move_history[i]
+            if mx is None:
+                move_text = f"{'B' if mc == 'B' else 'W'} PASS"
+            else:
+                col = chr(ord('A') + mx) if mx < 8 else chr(ord('A') + mx + 1)
+                row = self.grid_size - my
+                move_text = f"{'B' if mc == 'B' else 'W'}  {col}{row}"
+            color = (255, 223, 128) if i == current_index else (200, 200, 200)
+            bg_color = (50, 50, 65) if i == current_index else None
+            if bg_color:
+                pygame.draw.rect(surface, bg_color, (panel_x + 10, y_off - 2, panel_w - 20, 22), border_radius=4)
+            label = small_font.render(f"{i+1}. {move_text}", True, color)
+            surface.blit(label, (panel_x + 15, y_off))
+            y_off += 22
