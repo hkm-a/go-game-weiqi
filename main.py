@@ -7,6 +7,7 @@ from game.game_state import GameState
 from ui.renderer import Renderer
 from ui.components import Button, DifficultyButton, ToggleButton, UIManager
 from game.ai import EasyAI, MediumAI, HardAI
+from game.ko_utils import KoUtils
 
 def main():
     pygame.init()
@@ -36,21 +37,22 @@ def main():
     }
     ai = ai_instances[difficulty]
     
-    # 使用队列来传递AI的落子，避免线程安全问题
     ai_move_queue = queue.Queue()
     ai_thread = None
     is_game_over = False
     
     show_hints = False
     show_influence = False
+    show_ko_threats = True
     best_moves = []
     influence_map = []
     placed_times = {}
+    ko_threats = []
+    threat_scores = {}
     
     difficulty_buttons = []
     current_difficulty_buttons = []
     
-    # 按钮引用
     pass_btn = None
     undo_btn = None
     hints_btn = None
@@ -74,13 +76,11 @@ def main():
     def ai_worker():
         """AI工作线程"""
         try:
-            # 检查是否轮到白棋且游戏在进行中
             if game_state.current_player == 'W' and game_state.game_status == 'playing':
                 move = ai.get_move(game_state.board, game_state.current_player, game_state.rules, game_state.ko_point)
                 if move is not None:
                     ai_move_queue.put(move)
                 else:
-                    # AI没有有效落子，发送PASS
                     game_state.pass_move()
                     ai_move_queue.put(None)
         except Exception as e:
@@ -102,18 +102,20 @@ def main():
             if len(game_state.history) >= 2:
                 game_state.undo()
                 game_state.undo()
-
+    
     def end_game_func():
         if game_state.game_status == 'playing':
             game_state.end_game()
-
+    
     def restart_game():
-        nonlocal ai_thread, is_game_over, best_moves, influence_map, placed_times, difficulty
+        nonlocal ai_thread, is_game_over, best_moves, influence_map, placed_times, difficulty, ko_threats, threat_scores
         ai_thread = None
         is_game_over = False
         best_moves = []
         influence_map = []
         placed_times = {}
+        ko_threats = []
+        threat_scores = {}
         game_state.reset()
     
     def pass_move_func():
@@ -153,6 +155,24 @@ def main():
             print(f"势力图错误: {e}")
             influence_map = []
     
+    def update_ko_threats():
+        """更新劫材提示"""
+        nonlocal ko_threats, threat_scores
+        try:
+            if game_state.game_status == 'playing' and game_state.ko_point is not None:
+                ko_threats = KoUtils.find_ko_threats(game_state.board, game_state.current_player)
+                threat_scores = {}
+                for pos in ko_threats:
+                    score = KoUtils._evaluate_ko_threat(game_state.board, pos[0], pos[1], game_state.current_player)
+                    threat_scores[pos] = score
+            else:
+                ko_threats = []
+                threat_scores = {}
+        except Exception as e:
+            print(f"劫材提示错误: {e}")
+            ko_threats = []
+            threat_scores = {}
+    
     def toggle_hints():
         nonlocal show_hints
         show_hints = not show_hints
@@ -168,10 +188,8 @@ def main():
         if show_influence:
             update_influence()
     
-    # 创建按钮
     button_y = 40
     
-    # 第一行：难度选择（游戏开始时设置，之后锁定）
     easy_btn = DifficultyButton(sidebar_x, button_y, 120, 38, "初级", set_difficulty_easy, 'easy', is_selected=True)
     ui_manager.add_component(easy_btn)
     difficulty_buttons.append(easy_btn)
@@ -187,7 +205,6 @@ def main():
     difficulty_buttons.append(hard_btn)
     current_difficulty_buttons.append(hard_btn)
     
-    # 第二行：PASS和悔棋
     button_y += 55
     pass_btn = Button(sidebar_x, button_y, 185, 38, "PASS", pass_move_func)
     ui_manager.add_component(pass_btn)
@@ -195,7 +212,6 @@ def main():
     undo_btn = Button(sidebar_x + 195, button_y, 185, 38, "悔棋", undo_move)
     ui_manager.add_component(undo_btn)
     
-    # 第三行：提示和势力
     button_y += 55
     hints_btn = ToggleButton(sidebar_x, button_y, 185, 38, "提示: 关", "提示: 开", toggle_hints, is_on=False)
     ui_manager.add_component(hints_btn)
@@ -203,7 +219,6 @@ def main():
     influence_btn = ToggleButton(sidebar_x + 195, button_y, 185, 38, "势力: 关", "势力: 开", toggle_influence, is_on=False)
     ui_manager.add_component(influence_btn)
     
-    # 第四行：保存和读取
     button_y += 55
     save_btn = Button(sidebar_x, button_y, 185, 38, "保存", save_game_func)
     ui_manager.add_component(save_btn)
@@ -211,7 +226,6 @@ def main():
     load_btn = Button(sidebar_x + 195, button_y, 185, 38, "读取", load_game_func)
     ui_manager.add_component(load_btn)
     
-    # 第五行：结束游戏和重新开始
     button_y += 55
     end_game_btn = Button(sidebar_x, button_y, 185, 38, "结束游戏", end_game_func)
     ui_manager.add_component(end_game_btn)
@@ -228,12 +242,10 @@ def main():
                          not ai_busy and 
                          game_state.current_player == 'B')
         
-        # PASS按钮：仅在玩家回合可用
         if pass_btn:
             pass_btn.active = can_player_act
             pass_btn.color = (40, 40, 50) if can_player_act else (25, 25, 35)
         
-        # 悔棋按钮：玩家回合且有历史
         if undo_btn:
             can_undo = (game_state.game_status == 'playing' and 
                        not ai_busy and 
@@ -241,7 +253,6 @@ def main():
             undo_btn.active = can_undo
             undo_btn.color = (40, 40, 50) if can_undo else (25, 25, 35)
         
-        # 难度选择：游戏进行中且无AI时可用（用于开局前选择）
         for btn in difficulty_buttons:
             btn.active = not ai_busy and game_state.game_status == 'playing'
     
@@ -280,18 +291,16 @@ def main():
                                     best_moves = []
                                 if show_influence:
                                     update_influence()
+                                update_ko_threats()
         
-        # 检测AI是否完成
         ai_busy = ai_thread is not None and ai_thread.is_alive()
         
-        # 如果轮到白棋且AI没有在思考，启动AI
         if (not ai_busy and 
             game_state.current_player == 'W' and 
             game_state.game_status == 'playing' and
             ai_move_queue.empty()):
             start_ai_thinking()
         
-        # 检查AI是否完成并处理落子 - 只处理一个移动
         if not ai_busy and not ai_move_queue.empty():
             try:
                 move = ai_move_queue.get_nowait()
@@ -306,11 +315,11 @@ def main():
                         best_moves = []
                     if show_influence:
                         update_influence()
+                    update_ko_threats()
                 ai_thread = None
             except queue.Empty:
                 pass
         
-        # 更新提示
         current_time = time.time()
         ai_busy = ai_thread is not None and ai_thread.is_alive()
         if (show_hints and 
@@ -342,6 +351,9 @@ def main():
             game_state.game_status == 'playing' and 
             not ai_busy):
             renderer.draw_hints(screen, best_moves)
+        
+        if show_ko_threats and ko_threats and game_state.game_status == 'playing':
+            renderer.draw_ko_threats(screen, ko_threats, threat_scores)
         
         renderer.draw_pieces(screen, game_state.board, placed_times)
         ui_manager.draw(screen)

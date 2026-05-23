@@ -20,6 +20,9 @@ class Colors:
     BLUE = (80, 140, 220)
     TEXT_LIGHT = (230, 220, 200)
     TEXT_DARK = (30, 25, 20)
+    KO_THREAT_HIGH = (220, 80, 80)
+    KO_THREAT_MEDIUM = (255, 150, 80)
+    KO_THREAT_LOW = (255, 200, 150)
 
 def get_chinese_font(size):
     """加载支持中文的字体"""
@@ -165,7 +168,6 @@ class Renderer:
     def _draw_black_stone(self, surface, cx, cy, alpha=255, scale=1.0):
         radius = int(self.stone_radius * scale)
         
-        # 简单的阴影 - 降低透明度，避免重叠问题
         shadow_radius = radius + 2
         shadow_x = cx + 3
         shadow_y = cy + 3
@@ -173,7 +175,6 @@ class Renderer:
         if alpha == 255:
             pygame.draw.circle(surface, (0, 0, 0, 60), (shadow_x, shadow_y), shadow_radius)
         
-        # 棋子主体 - 多层渐变
         for r in range(radius, 0, -1):
             ratio = r / radius
             red = int(15 + 45 * ratio)
@@ -187,7 +188,6 @@ class Renderer:
             else:
                 pygame.draw.circle(surface, (red, green, blue), (cx, cy), r)
         
-        # 高光效果
         highlight_radius = radius // 3
         highlight_x = cx - radius // 4
         highlight_y = cy - radius // 4
@@ -201,7 +201,6 @@ class Renderer:
     def _draw_white_stone(self, surface, cx, cy, alpha=255, scale=1.0):
         radius = int(self.stone_radius * scale)
         
-        # 简单的阴影
         shadow_radius = radius + 2
         shadow_x = cx + 3
         shadow_y = cy + 3
@@ -209,7 +208,6 @@ class Renderer:
         if alpha == 255:
             pygame.draw.circle(surface, (0, 0, 0, 40), (shadow_x, shadow_y), shadow_radius)
         
-        # 棋子主体 - 多层渐变
         for r in range(radius, 0, -1):
             ratio = r / radius
             red = int(200 + 55 * ratio)
@@ -223,11 +221,9 @@ class Renderer:
             else:
                 pygame.draw.circle(surface, (red, green, blue), (cx, cy), r)
         
-        # 边缘
         if alpha == 255:
             pygame.draw.circle(surface, (150, 150, 160), (cx, cy), radius, 1)
         
-        # 高光效果
         highlight_radius = radius // 3
         highlight_x = cx - radius // 5
         highlight_y = cy - radius // 4
@@ -253,6 +249,37 @@ class Renderer:
             s = pygame.Surface((p['size']*2, p['size']*2), pygame.SRCALPHA)
             pygame.draw.circle(s, (*p['color'], p['alpha']), (p['size'], p['size']), p['size'])
             surface.blit(s, (p['x'] - p['size'], p['y'] - p['size']))
+    
+    def draw_ko_threats(self, surface, ko_threats, threat_scores):
+        """绘制劫材提示位置"""
+        start_x = self.board_x + 50
+        start_y = self.board_y + 50
+        
+        for pos in ko_threats:
+            grid_x, grid_y = pos
+            screen_x = start_x + grid_x * self.cell_size
+            screen_y = start_y + grid_y * self.cell_size
+            
+            score = threat_scores.get(pos, 0)
+            
+            if score >= 70:
+                color = Colors.KO_THREAT_HIGH
+                radius = self.stone_radius // 2
+                alpha = 200
+            elif score >= 40:
+                color = Colors.KO_THREAT_MEDIUM
+                radius = self.stone_radius // 3
+                alpha = 180
+            else:
+                color = Colors.KO_THREAT_LOW
+                radius = self.stone_radius // 4
+                alpha = 160
+            
+            ko_surface = pygame.Surface((radius * 2 + 4, radius * 2 + 4), pygame.SRCALPHA)
+            pygame.draw.circle(ko_surface, (*color, alpha), (radius + 2, radius + 2), radius)
+            pygame.draw.circle(ko_surface, (*color, 255), (radius + 2, radius + 2), radius, 2)
+            
+            surface.blit(ko_surface, (screen_x - radius - 2, screen_y - radius - 2))
     
     def draw_influence_map(self, surface, influence_map):
         start_x = self.board_x + 50
